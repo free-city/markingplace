@@ -1,0 +1,13 @@
+{
+  "description":"Microphone is the free city platform that is regarded as a tool for players to tokenize their social value. Players with microphones will have the ability to financialize social value.",
+  "external_url":"https://www.free-city.io/",
+  "image":"https://bafybeihxugw2qnzsqrr75tmrirjndisivytl6idqooqks6blbl2fbcrg34.ipfs.infura-ipfs.io/UR.png",
+  "name":"#100001",
+  "creater":"0x9F883b12fD0692714C2f28be6C40d3aFdb9081D3",
+  "attributes":[
+      {
+          "trait_type":"quality",
+          "value":"R"
+      }
+  ]
+}
