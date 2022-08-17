@@ -4,13 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "npx hardhat test",
     "compile": "npx hardhat compile",
-    "test_local": "npx hardhat test test/proxy.ts --network localhost ",
-    "deploy_proxy": "npx hardhat run scripts/deploy_proxy.ts --network goerli",
-    "deploy_exchange": "npx hardhat run scripts/deploy_exchange.ts --network goerli",
+    "test": "npx hardhat test test/FreeCityExchange.test.ts --network goerli",
+    "test_local": "npx hardhat test test/FreeCityExchange.test.ts --network localhost ",
     "deploy_local_proxy": "npx hardhat run scripts/deploy_proxy.ts --network localhost",
-    "deploy_all" : "npm run deploy_exchange && npm run  deploy_proxy",
+    "deploy_all" : "npx hardhat  run scripts/deploy.ts  --network goerli ",
     "deploy_local_exchange": "npx hardhat run scripts/deploy_exchange.ts --network localhost",
     "mintNft": "node src/index  NFT mint-nft "
   },

@@ -5,7 +5,7 @@ pragma solidity ^0.8.0;
 import "./AuthenticatedProxy.sol";
 import "./ProxyRegistry.sol";
 
-contract LandProxyRegistry is ProxyRegistry {
+contract FreeCityProxyRegistry is ProxyRegistry {
 
     string public constant name = "FCM Proxy Registry";
 

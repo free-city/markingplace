@@ -1,115 +1,51 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-
-import "./ERC20.sol";
-import "./ERC20Basic.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import "./ArrayUtils.sol";
 import "./SaleKindInterface.sol";
-import "../proxy/AuthenticatedProxy.sol";
+import "./ReentrancyGuarded.sol";
 import "../proxy/ProxyRegistry.sol";
-import "../proxy/TokenTransferProxy.sol";
-import "../utils/ArrayUtils.sol";
+import "../proxy/AuthenticatedProxy.sol";
+import "./SafeMath.sol";
 
-contract ExchangeCore is ReentrancyGuard, Ownable {
-    using ECDSA for bytes32;
-    /* The token used to pay exchange fees. */
-    ERC20 public exchangeToken;
+contract ExchangeCore is ReentrancyGuarded, Ownable {
 
     /* User registry. */
     ProxyRegistry public registry;
-    
-    /* Operator. */
-    address payable public operator;
-
-    /* Token transfer proxy. */
-    TokenTransferProxy public tokenTransferProxy;
 
     /* Cancelled / finalized orders, by hash. */
     mapping(bytes32 => bool) public cancelledOrFinalized;
 
-    /* Orders verified by on-chain approval (alternative to ECDSA signatures so that smart contracts can place orders directly). */
-    mapping(bytes32 => bool) public approvedOrders;
-
-    /* For split fee orders, minimum required protocol maker fee, in basis points. Paid to owner (who can change it). */
-    uint public minimumMakerProtocolFee;
-
-    /* For split fee orders, minimum required protocol taker fee, in basis points. Paid to owner (who can change it). */
-    uint public minimumTakerProtocolFee;
+    /* fee to pay to protocolFeeRecipient by order match caller.  */
+    uint public protocolFee;
 
     /* Recipient of protocol fees. */
-    address payable public protocolFeeRecipient;
-    
-    /* For aritist and referee fees. */
-    uint public royaltyFee = 1000;
+    address public protocolFeeRecipient;
 
-    /* Fee method: protocol fee or split fee. */
-    enum FeeMethod { ProtocolFee, SplitFee }
 
     /* Inverse basis point. */
     uint public constant INVERSE_BASIS_POINT = 10000;
-    
-    /* TransferFrom. */
-    bytes4 constant TRANSFERFROM = 0x23b872dd;
-    
-    uint tempAddr;
-    bytes20 tempAddr2;
-
-    /* An ECDSA signature. */
-    struct Sig {
-        /* v parameter */
-        uint8 v;
-        /* r parameter */
-        bytes32 r;
-        /* s parameter */
-        bytes32 s;
-    }
 
     /* An order on the exchange. */
     struct Order {
         /* Exchange address, intended as a versioning mechanism. */
         address exchange;
-        /* Order maker address. */
-        address payable maker;
-        /* Order taker address, if specified. */
-        address taker;
-        /* Maker relayer fee of the order, unused for taker order. */
-        uint makerRelayerFee;
-        /* Taker relayer fee of the order, or maximum taker fee for a taker order. */
-        uint takerRelayerFee;
-        /* Maker protocol fee of the order, unused for taker order. */
-        uint makerProtocolFee;
-        /* Taker protocol fee of the order, or maximum taker fee for a taker order. */
-        uint takerProtocolFee;
-        /* Order fee recipient or zero address for taker order. */
-        address payable feeRecipient;
-        /* Fee method (protocol token or split fee). */
-        FeeMethod feeMethod;
-        /* Side (buy/sell). */
-        SaleKindInterface.Side side;
-        /* Kind of sale. */
-        SaleKindInterface.SaleKind saleKind;
-        /* Target. */
+        /* Order seller address. */
+        address seller;
+        /* Order buyer address. */
+        address buyer;
+        /* Order maker adderss. */
+        address maker;
+        /* Token to be used. address(0) when ETH is used. */
+        address tokenAddress;
+        /* Target contract where tokenId exists */
         address target;
-        /* HowToCall. */
-        AuthenticatedProxy.HowToCall howToCall;
-        /* Calldata. */
-        bytes data;
-        /* Calldata replacement pattern, or an empty byte array for no replacement. */
-        bytes replacementPattern;
-        /* Static call target, zero-address for no static call. */
-        address staticTarget;
-        /* Static call extra data. */
-        bytes staticExtradata;
-        /* Token used to pay for the order, or the zero-address as a sentinel value for Ether. */
-        address paymentToken;
+        /* Token id. Offchain id when token is not minted. */
+        uint tokenId;
         /* Base price of the order (in paymentTokens). */
-        uint basePrice;
-        /* Auction extra parameter - minimum bid increment for English auctions, starting/ending price difference. */
-        uint extra;
+        uint price;
         /* Listing timestamp. */
         uint listingTime;
         /* Expiration timestamp - 0 for no expiry. */
@@ -118,129 +54,44 @@ contract ExchangeCore is ReentrancyGuard, Ownable {
         uint salt;
     }
     
-    event OrderApprovedPartOne    (bytes32 indexed hash, address exchange, address indexed maker, address taker, uint makerRelayerFee, uint takerRelayerFee, uint makerProtocolFee, uint takerProtocolFee, address indexed feeRecipient, FeeMethod feeMethod, SaleKindInterface.Side side, SaleKindInterface.SaleKind saleKind, address target);
-    event OrderApprovedPartTwo    (bytes32 indexed hash, AuthenticatedProxy.HowToCall howToCall, bytes data, bytes replacementPattern, address staticTarget, bytes staticExtradata, address paymentToken, uint basePrice, uint extra, uint listingTime, uint expirationTime, uint salt, bool orderbookInclusionDesired);
-    event OrderCancelled          (bytes32 indexed hash);
-    event OrdersMatched           (bytes32 buyHash, bytes32 sellHash, address indexed maker, address indexed taker, uint price);
-    event  TestOrder              (bytes32 buyHash, bytes32 sellHash);
-    
-    constructor (ProxyRegistry registryAddress, TokenTransferProxy tokenTransferProxyAddress, ERC20 tokenAddress, address payable protocolFeeAddress) Ownable() {
-        registry = registryAddress;
-        tokenTransferProxy = tokenTransferProxyAddress;//交易代理者
-        exchangeToken = tokenAddress;  //0地址
-        protocolFeeRecipient = protocolFeeAddress; //收费地址
-    }
-    
+    event OrderCancelled(bytes32 indexed hash);
+    event OrdersMatched(address indexed buyer, address indexed seller, uint indexed price, uint offchainTokenId,
+        uint onchainTokenID);
+
+
     /**
-     * @dev Change the minimum maker fee paid to the protocol (owner only)
-     * @param newMinimumMakerProtocolFee New fee to set in basis points
+     * @dev Change fee paid to protocol (owner only)
+     * @param newProtocolFee New fee to set in basis points
      */
-    function changeMinimumMakerProtocolFee(uint newMinimumMakerProtocolFee)
-    public
-    onlyOwner
+    function changeProtocolFee(uint newProtocolFee)
+        public
+        onlyOwner
     {
-        minimumMakerProtocolFee = newMinimumMakerProtocolFee;
+        protocolFee = newProtocolFee;
     }
-    
-    /**
-     * @dev Change the royalty fee paid to the artist and referee (owner only)
-     * @param newRoyaltyFee New fee to set in basis points
-     */
-    function changeRoyaltyFee(uint newRoyaltyFee)
-    public
-    onlyOwner
-    {
-        royaltyFee = newRoyaltyFee;
-    }
-    
-    /**
-     * @dev Change the minimum taker fee paid to the protocol (owner only)
-     * @param newMinimumTakerProtocolFee New fee to set in basis points
-     */
-    function changeMinimumTakerProtocolFee(uint newMinimumTakerProtocolFee)
-    public
-    onlyOwner
-    {
-        minimumTakerProtocolFee = newMinimumTakerProtocolFee;
-    }
-    
+
     /**
      * @dev Change the protocol fee recipient (owner only)
      * @param newProtocolFeeRecipient New protocol fee recipient address
      */
-    function changeProtocolFeeRecipient(address payable newProtocolFeeRecipient)
-    public
-    onlyOwner
+    function changeProtocolFeeRecipient(address newProtocolFeeRecipient)
+        public
+        onlyOwner
     {
         protocolFeeRecipient = newProtocolFeeRecipient;
     }
-    
-    /**
-     * @dev Transfer tokens
-     * @param token Token to transfer
-     * @param from Address to charge fees
-     * @param to Address to receive fees
-     * @param amount Amount of protocol tokens to charge
-     */
-    function transferTokens(address token, address from, address to, uint amount)
-    internal
-    {
-        if (amount > 0) {
-            require(tokenTransferProxy.transferFrom(token, from, to, amount),"n7");
-        }
-    }
-    
-    /**
-     * @dev Charge a fee in protocol tokens
-     * @param from Address to charge fees
-     * @param to Address to receive fees
-     * @param amount Amount of protocol tokens to charge
-     */
-    function chargeProtocolFee(address from, address to, uint amount)
-    internal
-    {
-        transferTokens(address(exchangeToken), from, to, amount);
-    }
-    
-    /**
-     * @dev Execute a STATICCALL (introduced with Ethereum Metropolis, non-state-modifying external call)
-     * @param target Contract to call
-     * @param data Calldata (appended to extradata)
-     * @param extradata Base data for STATICCALL (probably function selector and argument encoding)
-     * @return result of the call (success or failure)
-     */
-    function staticCall(address target, bytes memory data, bytes memory extradata)
-    public
-    view
-    returns (bool result)
-    {
-        bytes memory combined = new bytes(data.length + extradata.length);
-        uint index;
-        assembly {
-            index := add(combined, 0x20)
-        }
-        index = ArrayUtils.unsafeWriteBytes(index, extradata);
-        ArrayUtils.unsafeWriteBytes(index, data);
-        assembly {
-            result := staticcall(gas(), target, add(combined, 0x20), mload(combined), mload(0x40), 0)
-        }
-        return result;
-    }
-    
+
     /**
      * Calculate size of an order struct when tightly packed
-     *
-     * @param order Order to calculate size of
      * @return Size in bytes
      */
-    function sizeOf(Order memory order)
-    internal
-    pure
-    returns (uint)
+    function sizeOfOrder()
+        internal
+        pure
+        returns (uint)
     {
-        return ((0x14 * 7) + (0x20 * 9) + 4 + order.data.length + order.replacementPattern.length + order.staticExtradata.length);
+        return (0x14 * 6) + (0x20 * 5);
     }
-    
 
     /**
      * @dev Hash an order, returning the canonical order hash, without the message prefix
@@ -248,37 +99,25 @@ contract ExchangeCore is ReentrancyGuard, Ownable {
      * @return hash of order
      */
     function hashOrder(Order memory order)
-    public
-    pure
-    returns (bytes32 hash)
+        internal
+        pure
+        returns (bytes32 hash)
     {
         /* Unfortunately abi.encodePacked doesn't work here, stack size constraints. */
-        uint size = sizeOf(order);
+        uint size = sizeOfOrder();
         bytes memory array = new bytes(size);
         uint index;
         assembly {
             index := add(array, 0x20)
         }
         index = ArrayUtils.unsafeWriteAddress(index, order.exchange);
+        index = ArrayUtils.unsafeWriteAddress(index, order.seller);
+        index = ArrayUtils.unsafeWriteAddress(index, order.buyer);
         index = ArrayUtils.unsafeWriteAddress(index, order.maker);
-        index = ArrayUtils.unsafeWriteAddress(index, order.taker);
-        index = ArrayUtils.unsafeWriteUint(index, order.makerRelayerFee);
-        index = ArrayUtils.unsafeWriteUint(index, order.takerRelayerFee);
-        index = ArrayUtils.unsafeWriteUint(index, order.makerProtocolFee);
-        index = ArrayUtils.unsafeWriteUint(index, order.takerProtocolFee);
-        index = ArrayUtils.unsafeWriteAddress(index, order.feeRecipient);
-        index = ArrayUtils.unsafeWriteUint8(index, uint8(order.feeMethod));
-        index = ArrayUtils.unsafeWriteUint8(index, uint8(order.side));
-        index = ArrayUtils.unsafeWriteUint8(index, uint8(order.saleKind));
+        index = ArrayUtils.unsafeWriteAddress(index, order.tokenAddress);
         index = ArrayUtils.unsafeWriteAddress(index, order.target);
-        index = ArrayUtils.unsafeWriteUint8(index, uint8(order.howToCall));
-        index = ArrayUtils.unsafeWriteBytes(index, order.data);
-        index = ArrayUtils.unsafeWriteBytes(index, order.replacementPattern);
-        index = ArrayUtils.unsafeWriteAddress(index, order.staticTarget);
-        index = ArrayUtils.unsafeWriteBytes(index, order.staticExtradata);
-        index = ArrayUtils.unsafeWriteAddress(index, order.paymentToken);
-        index = ArrayUtils.unsafeWriteUint(index, order.basePrice);
-        index = ArrayUtils.unsafeWriteUint(index, order.extra);
+        index = ArrayUtils.unsafeWriteUint(index, order.tokenId);
+        index = ArrayUtils.unsafeWriteUint(index, order.price);
         index = ArrayUtils.unsafeWriteUint(index, order.listingTime);
         index = ArrayUtils.unsafeWriteUint(index, order.expirationTime);
         index = ArrayUtils.unsafeWriteUint(index, order.salt);
@@ -287,204 +126,141 @@ contract ExchangeCore is ReentrancyGuard, Ownable {
         }
         return hash;
     }
-    
 
-    function hashOrderPart(Order memory order)
-    public
-    pure
-    returns (bytes32 hash){
-
-        return keccak256(abi.encode(order.exchange,order.maker,order.taker,order.basePrice, order.salt, order.target,order.data));
-    }
     /**
      * @dev Hash an order, returning the hash that a client must sign, including the standard message prefix
      * @param order Order to hash
-     * @return Hash of message prefix and order hash per Ethereum format
+     * @return hash of message prefix and order hash per Ethereum format
      */
     function hashToSign(Order memory order)
-    public
-    pure
-    returns (bytes32)
+        internal
+        pure
+        returns (bytes32)
     {
-        return hashOrder(order).toEthSignedMessageHash();
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hashOrder(order)));
     }
 
-      function hashToSign1(Order memory order)
-    public
-    pure
-    returns (bytes32)
-    {
-       return keccak256(abi.encode("\x19Ethereum Signed Message:\n32", hashOrder(order)));
-    }
-    
     /**
      * @dev Assert an order is valid and return its hash
      * @param order Order to validate
-     * @param sig ECDSA signature
+     * @param signature ECDSA signature
      */
-    function requireValidOrder(Order memory order, Sig memory sig)
-    internal
-    view
-    returns (bytes32)
+    function requireValidOrder(Order memory order, bytes memory signature)
+        internal
+        view
+        returns (bytes32)
     {
         bytes32 hash = hashToSign(order);
-        require(validateOrder(hash, order, sig),"n2");
+        require(validateOrder(hash, order, signature));
         return hash;
     }
-    
-    function getArtist(bytes memory data)
-    internal
-    pure
-    returns (address) {
-        /* data should be "transferfrom". */
-        for (uint i = 0; i < 4; i++) {
-            if (data[i] != TRANSFERFROM[i]) {
-                return address(0);
-            }
-        }
-        uint160 addr;
-        for (uint i = 68; i < 88; i++) {
-            addr <<= 8;
-            addr += uint8(data[i]);
-        }
-        return address(addr);
-    }
-    
+
     /**
      * @dev Validate order parameters (does *not* check signature validity)
      * @param order Order to validate
      */
     function validateOrderParameters(Order memory order)
-    public
-    view
-    returns (bool)
+        internal
+        view
+        returns (bool)
     {
         /* Order must be targeted at this protocol version (this Exchange contract). */
         if (order.exchange != address(this)) {
             return false;
         }
-    
+
+        /* Order maker must be buyer or seller */
+        if (order.buyer != order.maker && order.seller != order.maker) {
+            return false;
+        }
+
         /* Order must possess valid sale kind parameter combination. */
-        if (!SaleKindInterface.validateParameters(order.saleKind, order.expirationTime)) {
+        if (!SaleKindInterface.validateParameters(order.listingTime, order.expirationTime)) {
             return false;
         }
-        
-        /* If using the split fee method, order must have sufficient protocol fees. */
-        if (order.feeMethod == FeeMethod.SplitFee && (order.makerProtocolFee < minimumMakerProtocolFee || order.takerProtocolFee < minimumTakerProtocolFee)) {
-            return false;
-        }
-        
+
         return true;
     }
-    
+
     /**
      * @dev Validate a provided previously approved / signed order, hash, and signature.
      * @param hash Order hash (already calculated, passed to avoid recalculation)
      * @param order Order to validate
-     * @param sig ECDSA signature
+     * @param signature ECDSA signature
      */
-    function validateOrder(bytes32 hash, Order memory order, Sig memory sig)
-    public
-    view
-    returns (bool)
+    function validateOrder(bytes32 hash, Order memory order, bytes memory signature) 
+        internal
+        view
+        returns (bool)
     {
-        /* Not done in an if-conditional to prevent unnecessary ecrecover evaluation, which seems to happen even though it should short-circuit. */
-        
+        /* Not done in an if-conditional to prevent unnecessary ecrecover evaluation, which seems to happen even though
+         * it should short-circuit. */
+
         /* Order must have valid parameters. */
         if (!validateOrderParameters(order)) {
             return false;
         }
-        
+
         /* Order must have not been canceled or already filled. */
         if (cancelledOrFinalized[hash]) {
             return false;
         }
-        
-        /* Order authentication. Order must be either:
-        /* (a) previously approved */
-        if (approvedOrders[hash]) {
-            return true;
-        }
-        
+
+        (uint8 v, bytes32 r, bytes32 s) = splitSignature(signature);
         /* or (b) ECDSA-signed by maker. */
-        if (hash.recover(sig.v, sig.r, sig.s) == order.maker) {
+        if (ecrecover(hash, v, r, s) == order.maker) {
             return true;
         }
-        
+
         return false;
     }
-    
-    /**
-     * @dev Approve an order and optionally mark it for orderbook inclusion. Must be called by the maker of the order
-     * @param order Order to approve
-     * @param orderbookInclusionDesired Whether orderbook providers should include the order in their orderbooks
-     */
-    function approveOrder(address sender, Order memory order, bool orderbookInclusionDesired)
-    public
+
+    function splitSignature(bytes memory sig)
+        public
+        pure
+        returns (
+            uint8 v,
+            bytes32 r,
+            bytes32 s
+        )
     {
-        /* CHECKS */
-        
-        /* Assert sender is authorized to approve order. */
-        require(sender == order.maker, "n2");
-        
-        /* Calculate order hash. */
-        bytes32 hash = hashToSign(order);
-        
-        /* Assert order has not already been approved. */
-        require(!approvedOrders[hash], "n3");
-        
-        /* EFFECTS */
-        
-        /* Mark order as approved. */
-        approvedOrders[hash] = true;
-        
-        /* Log approval event. Must be split in two due to Solidity stack size limitations. */
-        {
-            emit OrderApprovedPartOne(hash, order.exchange, order.maker, order.taker, order.makerRelayerFee, order.takerRelayerFee, order.makerProtocolFee, order.takerProtocolFee, order.feeRecipient, order.feeMethod, order.side, order.saleKind, order.target);
-        }
-        {
-            emit OrderApprovedPartTwo(hash, order.howToCall, order.data, order.replacementPattern, order.staticTarget, order.staticExtradata, order.paymentToken, order.basePrice, order.extra, order.listingTime, order.expirationTime, order.salt, orderbookInclusionDesired);
+        require(sig.length == 65, "invalid signature length");
+
+        assembly {
+            // first 32 bytes, after the length prefix
+            r := mload(add(sig, 32))
+            // second 32 bytes
+            s := mload(add(sig, 64))
+            // final byte (first byte of the next 32 bytes)
+            v := byte(0, mload(add(sig, 96)))
         }
     }
-    
+
     /**
      * @dev Cancel an order, preventing it from being matched. Must be called by the maker of the order
      * @param order Order to cancel
-     * @param sig ECDSA signature
+     * @param signature ECDSA signature
      */
-    function cancelOrder(address sender, Order memory order, Sig memory sig)
-    public
+    function cancelOrder(Order memory order, bytes memory signature) 
+        internal
     {
         /* CHECKS */
-        
+
         /* Calculate order hash. */
-        bytes32 hash = requireValidOrder(order, sig);
-        
+        bytes32 hash = requireValidOrder(order, signature);
+
         /* Assert sender is authorized to cancel order. */
-        require(sender == order.maker);
-        
+        require(msg.sender == order.maker);
+  
         /* EFFECTS */
-        
+      
         /* Mark order as cancelled, preventing it from being matched. */
         cancelledOrFinalized[hash] = true;
-        
+
         /* Log cancel event. */
         emit OrderCancelled(hash);
     }
-    
-    /**
-     * @dev Calculate the current price of an order (convenience function)
-     * @param order Order to calculate the price of
-     * @return The current price of the order
-     */
-    function calculateCurrentPrice (Order memory order)
-    public
-    view
-    returns (uint)
-    {
-        return SaleKindInterface.calculateFinalPrice(order.side, order.saleKind, order.basePrice, order.extra, order.listingTime, order.expirationTime);
-    }
-    
+
     /**
      * @dev Calculate the price two orders would match at, if in fact they would match (otherwise fail)
      * @param buy Buy-side order
@@ -492,333 +268,198 @@ contract ExchangeCore is ReentrancyGuard, Ownable {
      * @return Match price
      */
     function calculateMatchPrice(Order memory buy, Order memory sell)
-    public
-    view
-    returns (uint)
+        pure
+        internal
+        returns (uint)
     {
-        /* Calculate sell price. */
-        uint sellPrice = SaleKindInterface.calculateFinalPrice(sell.side, sell.saleKind, sell.basePrice, sell.extra, sell.listingTime, sell.expirationTime);
+        /* Require buy price is equal or greater to seller price. */
+        require(buy.price >= sell.price);
         
-        /* Calculate buy price. */
-        uint buyPrice = SaleKindInterface.calculateFinalPrice(buy.side, buy.saleKind, buy.basePrice, buy.extra, buy.listingTime, buy.expirationTime);
-        
-        /* Require price cross. */
-        require(buyPrice >= sellPrice);
-        
-        /* Maker/taker priority. */
-        return sell.feeRecipient != address(0) ? sellPrice : buyPrice;
+        return buy.price;
     }
-    
+
     /**
-     * @dev Execute all ERC20 token / Ether transfers associated with an order match (fees and buyer => seller transfer)
-     * @param buy Buy-side order
-     * @param sell Sell-side order
-     */
-    function executeFundsTransfer(Order memory buy, Order memory sell)
-    internal
-    returns (uint)
-    {
-        uint value = address(this).balance;
-        // address artist = getArtist(sell.data);
-        /* Only payable in the special case of unwrapped Ether. */
-        if (sell.paymentToken != address(0)) {
-            require(value == 0,"n6");
-        }
-    
-        /* Calculate match price. */
-        uint price = calculateMatchPrice(buy, sell);
-        
-        /* If paying using a token (not Ether), transfer tokens. This is done prior to fee payments to that a seller will have tokens before being charged fees. */
-        if (price > 0 && sell.paymentToken != address(0)) {
-            transferTokens(sell.paymentToken, buy.maker, sell.maker, price);
-        }
-        
-        /* Amount that will be received by seller (for Ether). */
-        uint receiveAmount = price;
-        
-        /* Amount that must be sent by buyer (for Ether). */
-        uint requiredAmount = price;
-        
-        /* Determine maker/taker and charge fees accordingly. */
-        if (sell.feeRecipient != address(0)) {
-            /* Sell-side order is maker. */
-            /* feeRecipient should be 1 or artist. */
-            // if (sell.feeRecipient != address(1)) {
-            //     require(sell.feeRecipient == artist, "n8");
-            // }
-            /* Assert taker fee is less than or equal to maximum fee specified by buyer. */
-            require(sell.takerRelayerFee <= buy.takerRelayerFee, "n9");
-            
-            if (sell.feeMethod == FeeMethod.SplitFee) {
-                /* Assert taker fee is less than or equal to maximum fee specified by buyer. */
-                require(sell.takerProtocolFee <= buy.takerProtocolFee, "n10");
-                
-                /* Maker fees are deducted from the token amount that the maker receives. Taker fees are extra tokens that must be paid by the taker. */
-                if (sell.feeRecipient != address(1)) {
-                    if (sell.makerRelayerFee > 0) {
-                        uint makerRelayerFee = sell.makerRelayerFee * price / INVERSE_BASIS_POINT;
-                        if (sell.paymentToken == address(0)) {
-                            receiveAmount = receiveAmount - makerRelayerFee;
-                            sell.feeRecipient.transfer(makerRelayerFee);
-                        } else {
-                            transferTokens(sell.paymentToken, sell.maker, sell.feeRecipient, makerRelayerFee);
-                        }
-                    }
-                    
-                    if (sell.takerRelayerFee > 0) {
-                        uint takerRelayerFee = sell.takerRelayerFee * price / INVERSE_BASIS_POINT;
-                        if (sell.paymentToken == address(0)) {
-                            requiredAmount = requiredAmount + takerRelayerFee;
-                            sell.feeRecipient.transfer(takerRelayerFee);
-                        } else {
-                            transferTokens(sell.paymentToken, buy.maker, sell.feeRecipient, takerRelayerFee);
-                        }
-                    }
-                }
-                
-                if (sell.makerProtocolFee > 0) {
-                    uint makerProtocolFee = sell.makerProtocolFee * price / INVERSE_BASIS_POINT;
-                    if (sell.paymentToken == address(0)) {
-                        receiveAmount = receiveAmount - makerProtocolFee;
-                        protocolFeeRecipient.transfer(makerProtocolFee);
-                    } else {
-                        transferTokens(sell.paymentToken, sell.maker, protocolFeeRecipient, makerProtocolFee);
-                    }
-                }
-                
-                if (sell.takerProtocolFee > 0) {
-                    uint takerProtocolFee = sell.takerProtocolFee * price / INVERSE_BASIS_POINT;
-                    if (sell.paymentToken == address(0)) {
-                        requiredAmount = requiredAmount + takerProtocolFee;
-                        protocolFeeRecipient.transfer(takerProtocolFee);
-                    } else {
-                        transferTokens(sell.paymentToken, buy.maker, protocolFeeRecipient, takerProtocolFee);
-                    }
-                }
-            
-            } else {
-                /* Charge maker fee to seller. */
-                chargeProtocolFee(sell.maker, sell.feeRecipient, sell.makerRelayerFee);
-                
-                /* Charge taker fee to buyer. */
-                chargeProtocolFee(buy.maker, sell.feeRecipient, sell.takerRelayerFee);
-            }
-        } else {
-            /* Buy-side order is maker. */
-            /* feeRecipient should be 1 or artist. */
-            // if (buy.feeRecipient != address(1)) {
-            //     require(buy.feeRecipient == artist);
-            // }
-            /* Assert taker fee is less than or equal to maximum fee specified by seller. */
-            require(buy.takerRelayerFee <= sell.takerRelayerFee);
-            
-            if (sell.feeMethod == FeeMethod.SplitFee) {
-                /* The Exchange does not escrow Ether, so direct Ether can only be used to with sell-side maker / buy-side taker orders. */
-                require(sell.paymentToken != address(0));
-                
-                /* Assert taker fee is less than or equal to maximum fee specified by seller. */
-                require(buy.takerProtocolFee <= sell.takerProtocolFee);
-                
-                if (sell.feeRecipient != address(1)) {
-                    if (buy.makerRelayerFee > 0) {
-                        uint makerRelayerFee = buy.makerRelayerFee * price / INVERSE_BASIS_POINT;
-                        transferTokens(sell.paymentToken, buy.maker, buy.feeRecipient, makerRelayerFee);
-                    }
-                    
-                    if (buy.takerRelayerFee > 0) {
-                        uint takerRelayerFee = buy.takerRelayerFee * price / INVERSE_BASIS_POINT;
-                        transferTokens(sell.paymentToken, sell.maker, buy.feeRecipient, takerRelayerFee);
-                    }
-                }
-                
-                if (buy.makerProtocolFee > 0) {
-                    uint makerProtocolFee = buy.makerProtocolFee * price / INVERSE_BASIS_POINT;
-                    transferTokens(sell.paymentToken, buy.maker, protocolFeeRecipient, makerProtocolFee);
-                }
-                
-                if (buy.takerProtocolFee > 0) {
-                    uint takerProtocolFee = buy.takerProtocolFee * price / INVERSE_BASIS_POINT;
-                    transferTokens(sell.paymentToken, sell.maker, protocolFeeRecipient, takerProtocolFee);
-                }
-        
-            } else {
-                /* Charge maker fee to buyer. */
-                chargeProtocolFee(buy.maker, buy.feeRecipient, buy.makerRelayerFee);
-                
-                /* Charge taker fee to seller. */
-                chargeProtocolFee(sell.maker, buy.feeRecipient, buy.takerRelayerFee);
-            }
-        }
-        
-        if (sell.paymentToken == address(0)) {
-            /* Special-case Ether, order must be matched by buyer. */
-            require(value >= requiredAmount,"n11");
-            sell.maker.transfer(receiveAmount);
-            /* Allow overshoot for variable-price auctions, refund difference. */
-            uint diff = value - requiredAmount;
-            if (diff > 0) {
-                buy.maker.transfer(diff);
-            }
-        }
-        
-        /* This contract should never hold Ether, however, we cannot assert this, since it is impossible to prevent anyone from sending Ether e.g. with selfdestruct. */
-        
-        return price;
-    }
-    
-    /**
-     * @dev Return whether or not two orders can be matched with each other by basic parameters (does not check order signatures / calldata or perform static calls)
+     * @dev Return whether or not two orders can be matched with each other by basic parameters (does not check order
+     * signatures / calldata or perform static calls)
      * @param buy Buy-side order
      * @param sell Sell-side order
      * @return Whether or not the two orders can be matched
      */
     function ordersCanMatch(Order memory buy, Order memory sell)
-    public
-    view
-    returns (bool)
+        internal
+        view
+        returns (bool)
     {
         return (
-            /* Must be opposite-side. */
-            (buy.side == SaleKindInterface.Side.Buy && sell.side == SaleKindInterface.Side.Sell) &&
-            /* Must use same fee method. */
-            (buy.feeMethod == sell.feeMethod) &&
-            /* Must use same payment token. */
-            (buy.paymentToken == sell.paymentToken) &&
-            /* Must match maker/taker addresses. */
-            (sell.taker == address(0) || sell.taker == buy.maker) &&
-            (buy.taker == address(0) || buy.taker == sell.maker) &&
-            /* One must be maker and the other must be taker (no bool XOR in Solidity). */
-            ((sell.feeRecipient == address(0) && buy.feeRecipient != address(0)) || (sell.feeRecipient != address(0) && buy.feeRecipient == address(0))) &&
-            /* Must match target. */
+            /* Match version */
+            (sell.exchange == buy.exchange) &&
+            /* Match seller and buyer */
+            ((sell.buyer == address(0) && buy.seller == sell.seller) ||
+            (buy.seller == sell.seller && buy.buyer == sell.buyer)) &&
+            /* Token must match */
+            (sell.tokenAddress == buy.tokenAddress) && 
+            /* Targets must match */
             (buy.target == sell.target) &&
-            /* Must match howToCall. */
-            (buy.howToCall == sell.howToCall) &&
-            /* Buy-side order must be settleable. */
+            /* Must match token id in transaction on this order. */
+            (buy.tokenId == sell.tokenId) &&
+            /* Buyer offer must be greater than or equal to seller price */
+            (buy.price >= sell.price) &&
+            // /* Buy-side order must be settleable. */
             SaleKindInterface.canSettleOrder(buy.listingTime, buy.expirationTime) &&
-            /* Sell-side order must be settleable. */
+            // /* Sell-side order must be settleable. */
             SaleKindInterface.canSettleOrder(sell.listingTime, sell.expirationTime)
         );
     }
-    
-    function dataCanMatched(bytes memory sellData, bytes memory buyData)
-    public
-    pure
-    returns (bool)
-    {
-        uint i;
-        // confirm method
-        for (i = 0; i < 4; i++) {
-            if (sellData[i] != buyData[i]) {
-                return false;
-            }
-        }
-        // confirm tokenID
-        for (i = 36; i < 64; i++) {
-            if (sellData[i] != buyData[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-    
-    function isPackage(bytes memory sellData)
-    public
-    pure
-    returns(bool)
-    {
-        return sellData[67] == 0;
-    }
-    
+
     /**
-     * @dev Atomically match two orders, ensuring validity of the match, and execute all associated state transitions. Protected against reentrancy by a contract-global lock.
+     * @dev Atomically match two orders, ensuring validity of the match, and execute all associated state transitions.
+     * Protected against reentrancy by a contract-global lock.
      * @param buy Buy-side order
-     * @param buySig Buy-side order signature
+     * @param buySignature Buy-side order signature
      * @param sell Sell-side order
-     * @param sellSig Sell-side order signature
+     * @param sellSignature Sell-side order signature
      */
-    function atomicMatch(Order memory buy, Sig memory buySig, Order memory sell, Sig memory sellSig)
-    public
-    nonReentrant
+    function atomicMatch(Order memory buy, bytes memory buySignature, Order memory sell, bytes memory sellSignature)
+        internal
+        reentrancyGuard
     {
         /* CHECKS */
-        
-        /* Ensure buy order validity and calculate hash if necessary. */
-        bytes32 buyHash = requireValidOrder(buy, buySig);
-    
-        /* Ensure sell order validity and calculate hash if necessary. */
-        bytes32 sellHash = requireValidOrder(sell, sellSig);
+        require(buy.maker != sell.maker, "Order makers must not be same address");
+      
+        /* validate that buySig was signed by buy order maker. */
+        bytes32 buyHash = requireValidOrder(buy, buySignature);
 
-        /* Must be matchable. */
-        require(ordersCanMatch(buy, sell), "n1");
-        
-        /* Target must exist (prevent malicious selfdestructs just prior to order settlement). */
-        uint size;
-        address target = sell.target;
-        assembly {
-            size := extcodesize(target)
-        }
-        require(size > 0,"n3");
+        /* validate that sellSig was signed by sell order maker. */
+        bytes32 sellHash = requireValidOrder(sell, sellSignature);
 
-        bool package;
-        /* Transer. */
-        if (buy.replacementPattern.length != 0 ) {
-            /* Must match calldata after replacement, if specified. */
-            if (buy.replacementPattern.length > 0) {
-                ArrayUtils.guardedArrayReplace(buy.data, sell.data, buy.replacementPattern);
-            }
-            if (sell.replacementPattern.length > 0) {
-                ArrayUtils.guardedArrayReplace(sell.data, buy.data, sell.replacementPattern);
-            }
-            require(ArrayUtils.arrayEq(buy.data, sell.data), "n4");
-        } else {
-            require(dataCanMatched(sell.data, buy.data), "n5");
-            package = isPackage(sell.data);
-            sell.data = buy.data;
-        }
+        require(buyHash != sellHash, "Self-matching orders is prohibited");
+        
+        /* Orders must match. */
+        require(ordersCanMatch(buy, sell));
 
-        /* Retrieve delegateProxy contract. */
-        OwnableDelegateProxy delegateProxy = registry.proxies(sell.maker);
-        
-        /* Proxy must exist. */
-        require(address(delegateProxy) != address(0), "n6");
-        
-        /* Assert implementation. */
-        require(delegateProxy.implementation() == registry.delegateProxyImplementation(),"n7");
-        
-        /* Access the passthrough AuthenticatedProxy. */
-        AuthenticatedProxy proxy = AuthenticatedProxy(address(delegateProxy));
-        
-        /* EFFECTS */
-        
-        /* Mark previously signed or approved orders as finalized. */
-        cancelledOrFinalized[buyHash] = true;
-        if (!package) {
-            cancelledOrFinalized[sellHash] = true;
-        }
-        
         /* INTERACTIONS */
-        
+
+        /* Mint (if necessary) and transfer NFT. */
+        uint tokenId = executeSellerPromise(sell, buy);
+
+        /* Fetch creator of NFT */
+        // IERC721 target = IERC721(sell.target);
+        // address creator = target.creatorOf(tokenId);
+
         /* Execute funds transfer and pay fees. */
         uint price = executeFundsTransfer(buy, sell);
-        
-        /* Execute specified call through proxy. */
-        require(proxy.proxy(sell.target, sell.howToCall, sell.data), "n8");
-        
-        /* Static calls are intentionally done after the effectful call so they can check resulting state. */
-        
-        /* Handle buy-side static call if specified. */
-        if (buy.staticTarget != address(0)) {
-            require(staticCall(buy.staticTarget, sell.data, buy.staticExtradata), "n9");
-        }
-        
-        /* Handle sell-side static call if specified. */
-        if (sell.staticTarget != address(0)) {
-            require(staticCall(sell.staticTarget, sell.data, sell.staticExtradata), "n10");
-        }
-        
+
+        /* EFFECTS */
+
+        /* Mark orders hash as finalized, to prevent reuse. */
+        cancelledOrFinalized[buyHash] = true;
+        cancelledOrFinalized[sellHash] = true;
+
         /* Log match event. */
-        emit OrdersMatched(buyHash, sellHash, sell.feeRecipient != address(0) ? sell.maker : buy.maker, sell.feeRecipient != address(0) ? buy.maker : sell.maker, price);
+        emit OrdersMatched(buy.buyer, sell.seller, price, sell.tokenId, tokenId);
     }
-    
-    receive() external payable {}
+
+    /**
+     * @dev Execute all ERC20 token / Ether transfers associated with an order match (fees and buyer => seller transfer)
+     * @param buy order
+     * @param sell order
+     */
+    function executeFundsTransfer(Order memory buy, Order memory sell)
+        internal
+        returns (uint)
+    {
+        /* Calculate match price. */
+        uint price = SaleKindInterface.calculateFinalPrice(sell.price, buy.price);
+
+        /* Fees distribution */
+        uint receiveAmount = price;
+        uint calculatedProtocolFee = SafeMath.div(SafeMath.mul(protocolFee, price), INVERSE_BASIS_POINT);
+        // uint calculatedCreatorFee = SafeMath.div(SafeMath.mul(creatorFee, price), INVERSE_BASIS_POINT);
+        uint sellerFee = SafeMath.sub(receiveAmount, calculatedProtocolFee);
+
+        /* ERC20 token */
+        if (buy.tokenAddress != address(0)) {
+            /* Retrieve delegateProxy contract. */
+            OwnableDelegateProxy delegateProxy = registry.proxies(buy.buyer);
+
+            /* Proxy must exist. */
+            require(address(delegateProxy) != address(0));
+
+            /* Assert implementation. */
+            require(delegateProxy.implementation() == registry.delegateProxyImplementation());
+
+            /* Access the passthrough AuthenticatedProxy. */
+            AuthenticatedProxy proxy = AuthenticatedProxy(payable(address(delegateProxy)));
+
+            /* Execute specified call to transfer protocol fee tokens through proxy. */
+            bytes memory protocolFeeCallData = tokensTransferCalldata(buy.buyer, protocolFeeRecipient,
+                                                                      calculatedProtocolFee);
+            require(proxy.proxy(sell.tokenAddress, AuthenticatedProxy.HowToCall.Call, protocolFeeCallData));
+
+            /* Execute specified call to transfer seller fee tokens through proxy. */
+            bytes memory sellerFeeCallData = tokensTransferCalldata(buy.buyer, sell.seller, sellerFee);
+            require(proxy.proxy(sell.tokenAddress, AuthenticatedProxy.HowToCall.Call, sellerFeeCallData));
+        } else {
+            /* validate received amount is higher than price */
+            require(msg.value >= price, "send more eth");
+            
+            /* transfer fee to protocol */
+            payable(protocolFeeRecipient).transfer(calculatedProtocolFee);
+
+            /* transfer fee to protocol */
+            // payable(creator).transfer(calculatedCreatorFee);
+
+            /* transfer payement to seller */
+            payable(sell.seller).transfer(sellerFee);
+        }
+
+        return price;
+    }
+
+    /**
+     * @dev token transfer calldata.
+     * @param from address
+     * @param to address
+     * @param amount of tokens to transfer
+     */
+    function tokensTransferCalldata(address from, address to, uint256 amount)
+        internal
+        pure
+        returns(bytes memory)
+    {
+        return abi.encodeWithSignature("transferFrom(address,address,uint256)", from, to, amount);
+    }
+
+    function executeSellerPromise(Order memory sell, Order memory buy)
+        internal
+        returns(uint)
+    {
+        /* Retrieve delegateProxy contract. */
+        OwnableDelegateProxy delegateProxy = registry.proxies(sell.seller);
+
+        /* Proxy must exist. */
+        require(address(delegateProxy) != address(0));
+
+        /* Assert implementation. */
+        require(delegateProxy.implementation() == registry.delegateProxyImplementation());
+
+        /* Access the passthrough AuthenticatedProxy. */
+        AuthenticatedProxy proxy = AuthenticatedProxy(payable(address(delegateProxy)));
+
+        uint tokenId = sell.tokenId;
+
+        // /* Execute specified call to transfer asset through proxy. */
+        bytes memory callData = sellerCallDataFromOrders(buy.buyer, sell.seller, tokenId);
+        require(proxy.proxy(sell.target, AuthenticatedProxy.HowToCall.Call, callData), "Failed to transfer NFT");
+
+        return tokenId;
+    }
+
+    function sellerCallDataFromOrders(address buyer, address seller, uint tokenId)
+        internal
+        pure
+        returns(bytes memory)
+    {
+        return abi.encodeWithSignature("safeTransferFrom(address,address,uint256)", seller, buyer, tokenId);
+    }
 }
