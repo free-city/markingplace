@@ -67,6 +67,7 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         public
         onlyOwner
     {
+        require(protocolFee< type(uint16).max, "exceed max");
         protocolFee = newProtocolFee;
     }
 
@@ -404,7 +405,7 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
             require(msg.value >= price, "send more eth");
             
             /* transfer fee to protocol */
-            payable(protocolFeeRecipient).transfer(calculatedProtocolFee);
+            payable(protocolFeeRecipient).sendValue(calculatedProtocolFee);
 
             /* transfer fee to protocol */
             // payable(creator).transfer(calculatedCreatorFee);

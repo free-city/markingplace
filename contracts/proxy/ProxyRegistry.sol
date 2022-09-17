@@ -11,7 +11,7 @@ contract ProxyRegistry is Ownable {
 
    event ProxyReg(address proxy,address user);
     /* DelegateProxy implementation contract. Must be initialized. */
-    address public delegateProxyImplementation;
+    address public  delegateProxyImplementation;
 
     /* Authenticated proxies by user. */
     mapping(address => OwnableDelegateProxy) public proxies;
