@@ -156,6 +156,14 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         return hash;
     }
 
+
+    function sendValue(address payable recipient, uint256 amount) internal {
+        require(address(this).balance >= amount, "Address: insufficient balance");
+
+        (bool success, ) = recipient.call{value: amount}("");
+        require(success, "Address: unable to send value, recipient may have reverted");
+    }
+
     /**
      * @dev Validate order parameters (does *not* check signature validity)
      * @param order Order to validate
@@ -260,23 +268,6 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
 
         /* Log cancel event. */
         emit OrderCancelled(hash);
-    }
-
-    /**
-     * @dev Calculate the price two orders would match at, if in fact they would match (otherwise fail)
-     * @param buy Buy-side order
-     * @param sell Sell-side order
-     * @return Match price
-     */
-    function calculateMatchPrice(Order memory buy, Order memory sell)
-        pure
-        internal
-        returns (uint)
-    {
-        /* Require buy price is equal or greater to seller price. */
-        require(buy.price >= sell.price);
-        
-        return buy.price;
     }
 
     /**
@@ -405,13 +396,11 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
             require(msg.value >= price, "send more eth");
             
             /* transfer fee to protocol */
-            payable(protocolFeeRecipient).sendValue(calculatedProtocolFee);
-
-            /* transfer fee to protocol */
-            // payable(creator).transfer(calculatedCreatorFee);
+            sendValue(payable(protocolFeeRecipient),calculatedProtocolFee);
+            // payable(protocolFeeRecipient).sendValue(calculatedProtocolFee);
 
             /* transfer payement to seller */
-            payable(sell.seller).transfer(sellerFee);
+                   sendValue(payable(sell.seller),sellerFee);
         }
 
         return price;
