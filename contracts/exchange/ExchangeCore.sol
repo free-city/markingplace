@@ -57,6 +57,8 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
     event OrderCancelled(bytes32 indexed hash);
     event OrdersMatched(address indexed buyer, address indexed seller, uint indexed price, uint offchainTokenId,
         uint onchainTokenID);
+    event ChangeProtocolFee(uint indexed protocolFee);
+    event ChangeProtocolFeeRecipient(address indexed protocolFeeRecipient);
 
 
     /**
@@ -69,6 +71,8 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
     {
         require(protocolFee< type(uint16).max, "exceed max");
         protocolFee = newProtocolFee;
+        emit ChangeProtocolFee(newProtocolFee);
+
     }
 
     /**
@@ -79,7 +83,9 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         public
         onlyOwner
     {
+        require(newProtocolFeeRecipient!= address(0));
         protocolFeeRecipient = newProtocolFeeRecipient;
+        emit ChangeProtocolFeeRecipient(newProtocolFeeRecipient);
     }
 
     /**
@@ -152,7 +158,7 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         returns (bytes32)
     {
         bytes32 hash = hashToSign(order);
-        require(validateOrder(hash, order, signature));
+        require(validateOrder(hash, order, signature),"Order info error");
         return hash;
     }
 
@@ -259,7 +265,7 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         bytes32 hash = requireValidOrder(order, signature);
 
         /* Assert sender is authorized to cancel order. */
-        require(msg.sender == order.maker);
+        require(msg.sender == order.maker, "Maker address mismatch");
   
         /* EFFECTS */
       
@@ -327,7 +333,7 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         require(buyHash != sellHash, "Self-matching orders is prohibited");
         
         /* Orders must match. */
-        require(ordersCanMatch(buy, sell));
+        require(ordersCanMatch(buy, sell), "Order mismatch");
 
         /* INTERACTIONS */
 
@@ -366,9 +372,9 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         /* Fees distribution */
         uint receiveAmount = price;
         uint calculatedProtocolFee = SafeMath.div(SafeMath.mul(protocolFee, price), INVERSE_BASIS_POINT);
-        // uint calculatedCreatorFee = SafeMath.div(SafeMath.mul(creatorFee, price), INVERSE_BASIS_POINT);
+        // uint calculatedProtocolFee = (protocolFee * price) / (INVERSE_BASIS_POINT);
         uint sellerFee = SafeMath.sub(receiveAmount, calculatedProtocolFee);
-
+        // uint sellerFee = receiveAmount - calculatedProtocolFee;
         /* ERC20 token */
         if (buy.tokenAddress != address(0)) {
             /* Retrieve delegateProxy contract. */
@@ -378,7 +384,7 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
             require(address(delegateProxy) != address(0));
 
             /* Assert implementation. */
-            require(delegateProxy.implementation() == registry.delegateProxyImplementation());
+            require(delegateProxy.implementation() == registry.delegateProxyImplementation(), "implementation mismatch");
 
             /* Access the passthrough AuthenticatedProxy. */
             AuthenticatedProxy proxy = AuthenticatedProxy(payable(address(delegateProxy)));
@@ -386,11 +392,11 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
             /* Execute specified call to transfer protocol fee tokens through proxy. */
             bytes memory protocolFeeCallData = tokensTransferCalldata(buy.buyer, protocolFeeRecipient,
                                                                       calculatedProtocolFee);
-            require(proxy.proxy(sell.tokenAddress, AuthenticatedProxy.HowToCall.Call, protocolFeeCallData));
+            require(proxy.proxy(sell.tokenAddress, AuthenticatedProxy.HowToCall.Call, protocolFeeCallData), "Failed to transfer protocolFee");
 
             /* Execute specified call to transfer seller fee tokens through proxy. */
             bytes memory sellerFeeCallData = tokensTransferCalldata(buy.buyer, sell.seller, sellerFee);
-            require(proxy.proxy(sell.tokenAddress, AuthenticatedProxy.HowToCall.Call, sellerFeeCallData));
+            require(proxy.proxy(sell.tokenAddress, AuthenticatedProxy.HowToCall.Call, sellerFeeCallData), "Failed to transfer sellerFee");
         } else {
             /* validate received amount is higher than price */
             require(msg.value >= price, "send more eth");
@@ -428,7 +434,7 @@ contract ExchangeCore is ReentrancyGuarded, Ownable {
         OwnableDelegateProxy delegateProxy = registry.proxies(sell.seller);
 
         /* Proxy must exist. */
-        require(address(delegateProxy) != address(0));
+        require(address(delegateProxy) != address(0), "delegateProxy address ");
 
         /* Assert implementation. */
         require(delegateProxy.implementation() == registry.delegateProxyImplementation());

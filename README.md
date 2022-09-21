@@ -1,46 +1,133 @@
-# Advanced Sample Hardhat Project
+# CertiK Verified on Sept 15th, 2022
 
-This project demonstrates an advanced Hardhat use case, integrating other tools commonly used alongside Hardhat in the ecosystem.
+TABLE OF CONTENTS |  ``FREECITY``
 
-The project comes with a sample contract, a test for that contract, a sample script that deploys that contract, and an example of a task implementation, which simply lists the available accounts. It also comes with a variety of other tools, preconfigured to work with the project code.
 
-Try running some of the following tasks:
 
+Findings:
+
+1.Usage of `transfer`/`send` for sending Ether
 ```shell
-npx hardhat accounts
-npx hardhat compile
-npx hardhat clean
-npx hardhat test
-npx hardhat node
-npx hardhat help
-REPORT_GAS=true npx hardhat test
-npx hardhat coverage
-npx hardhat run scripts/deploy.ts
-TS_NODE_FILES=true npx ts-node scripts/deploy.ts
-npx eslint '**/*.{js,ts}'
-npx eslint '**/*.{js,ts}' --fix
-npx prettier '**/*.{json,sol,md}' --check
-npx prettier '**/*.{json,sol,md}' --write
-npx solhint 'contracts/**/*.sol'
-npx solhint 'contracts/**/*.sol' --fix
+ECF-01 : It has been changed,replace to sendValue
 ```
 
-# Etherscan verification
-
-To try out Etherscan verification, you first need to deploy a contract to an Ethereum network that's supported by Etherscan, such as Ropsten.
-
-In this project, copy the .env.example file to a file named .env, and then edit it to fill in the details. Enter your Etherscan API key, your Ropsten node URL (eg from Alchemy), and the private key of the account which will send the deployment transaction. With a valid .env file in place, first deploy your contract:
-
+2.Missing Upper Bound For Fees
 ```shell
-hardhat run --network ropsten scripts/deploy.ts
+ECF-02 : It has been changed,add type(uint16).max as limit
 ```
 
-Then, copy the deployment address and paste it in to replace `DEPLOYED_CONTRACT_ADDRESS` in this command:
-
+3.Centralization Risks in `FreeCityGame_v2.sol` and `MyToken.sol`
 ```shell
-npx hardhat verify --network ropsten DEPLOYED_CONTRACT_ADDRESS "Hello, Hardhat!"
+FCC-01 : no change ,Our project is currently not fully decentralized
 ```
 
-# Performance optimizations
+4.Centralization Risks in `Proxy Contracts` and `ExchangeCore.sol`
+```shell
+FCC-02 : no change , because only exchangecore has the role, user can revoke the authertication , That's no security risk
+```
 
-For faster runs of your tests and scripts, consider skipping ts-node's type checking by setting the environment variable `TS_NODE_TRANSPILE_ONLY` to `1` in hardhat's environment. For more details see [the documentation](https://hardhat.org/guides/typescript.html#performance-optimizations).
+5.Potential Reentrancy Attack
+```shell
+FCC-03 : It has been changed, but it is unnecessary, because no call out contract
+```
+
+6.Missing Zero Address Validation
+```shell
+FCC-04 : It has been changed, add zero address judgment
+```
+
+7.Missing Error Messages
+```shell
+FCC-07 : It has been changed, Error Messages with require added
+```
+
+8.Redundant Code Components
+```shell
+FCC-08 : It has been changed, Deleted
+```
+
+9.Missing Emit Events
+```shell
+FCC-09 : It has been changed, Added some events
+```
+10.Dead Code
+```shell
+FCC-10 : It has been changed, Dead Code Deleted
+```
+
+11.Unused Event
+```shell
+FCC-11 : It has been changed, Unused Event Deleted
+```
+
+12.`transferFrom()` in `ERC20.sol` Has No Implementation
+```shell
+FCC-12 : no change, ERC20 contract only serve test env
+```
+
+13.Centralized Control of Contract Upgrade
+```shell
+FCG-01 : no change, Our project is currently not fully decentralized
+```
+
+14.Lack Of Access Control
+```shell
+FCG-02 : It has been changed,  add access role control
+```
+
+15.Comparison to Boolean Constant
+```shell
+FCG-06 : It has been changed,require judge false or true
+```
+
+16.Typo
+```shell
+FCG-07 : It has been changed, blindBoxBaseUrl -> blindBoxBaseUri
+```
+
+17.Unused Contract
+```shell
+FCK-02 : no change,  test use
+```
+
+18.`calculateFinalPrice()` is Unclear
+```shell
+SKI-01 : It has been changed, remove it
+```
+
+19.Misleading Function Name
+```shell
+TRF-01 : no change
+```
+
+20.Improper Usage of `public` and `external` Type
+```shell
+FCC-05 : Part has changed
+```
+
+21.State Variable Should Be Declared `constant`
+```shell
+FCC-06 : no change  
+```
+
+22.User-Defined Getters
+```shell
+FCG-03 : no change  
+```
+
+23.Unused State Variables
+```shell
+FCG-04 : It has been changed, remove unuse state Variables
+```
+
+24.Costly Operation Inside Loop
+```shell
+FCG-05 : It has been changed, use local variales
+```
+
+25.Unnecessary Use of SafeMath
+```shell
+FCK-01 : no change
+```
+
+

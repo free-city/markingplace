@@ -42,7 +42,7 @@ library SaleKindInterface {
         internal
         returns (uint finalPrice)
     {
-        require(buyerPrice >= sellerPrice);
+        require(buyerPrice >= sellerPrice, "price error");
         return buyerPrice;
     }
 }

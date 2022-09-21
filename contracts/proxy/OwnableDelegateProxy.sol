@@ -7,10 +7,11 @@ contract OwnableDelegateProxy is OwnedUpgradeabilityProxy {
 
     constructor(address owner, address initialImplementation, bytes memory data)
     {
+        require((owner != address(0)) && (initialImplementation!= address(0)));
         setUpgradeabilityOwner(owner);
         _upgradeTo(initialImplementation);
         (bool ok, ) = initialImplementation.delegatecall(data);
-        require(ok);
+        require(ok,"init implementation failed");
     }
     
     /**
@@ -19,7 +20,7 @@ contract OwnableDelegateProxy is OwnedUpgradeabilityProxy {
     */
     fallback() external {
         address _impl = implementation();
-        require(_impl != address(0));
+        require(_impl != address(0), "impl cannot be zero address");
 
         assembly {
             let ptr := mload(0x40)

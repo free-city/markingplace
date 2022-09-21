@@ -9,6 +9,8 @@ contract FreeCityProxyRegistry is ProxyRegistry {
 
     string public constant name = "FCM Proxy Registry";
 
+    event GrantAuthentication(address indexed);
+
     constructor ()
     {
         delegateProxyImplementation = address(new AuthenticatedProxy());
@@ -21,8 +23,9 @@ contract FreeCityProxyRegistry is ProxyRegistry {
      */
     function grantAuthentication (address authAddress)
     onlyOwner
-    public
+    external
     {
         contracts[authAddress] = true;
+        emit GrantAuthentication(authAddress);
     }
 }

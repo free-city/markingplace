@@ -3,15 +3,16 @@
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "./OwnableDelegateProxy.sol";
 
-contract ProxyRegistry is Ownable {
+contract ProxyRegistry is Ownable,ReentrancyGuard{
 
 
    event ProxyReg(address proxy,address user);
+   event RevokeAuthentication(address indexed);
     /* DelegateProxy implementation contract. Must be initialized. */
-    address public  delegateProxyImplementation;
+    address  public delegateProxyImplementation;
 
     /* Authenticated proxies by user. */
     mapping(address => OwnableDelegateProxy) public proxies;
@@ -26,10 +27,11 @@ contract ProxyRegistry is Ownable {
      * @param addr Address of which to revoke permissions
      */    
     function revokeAuthentication (address addr)
-        public
+        external
         onlyOwner
     {
         contracts[addr] = false;
+        emit RevokeAuthentication(addr);
     }
 
     /**
@@ -40,9 +42,10 @@ contract ProxyRegistry is Ownable {
      */
     function registerProxy()
         public
+        nonReentrant
         returns (OwnableDelegateProxy proxy)
     {
-        require(address(proxies[msg.sender]) == address(0));
+        require(address(proxies[msg.sender]) == address(0) , "user must register proxy");
         proxy = new OwnableDelegateProxy(msg.sender, delegateProxyImplementation, abi.encodeWithSignature("initialize(address,address)", msg.sender, address(this)));
         proxies[msg.sender] = proxy;
         emit ProxyReg(address(proxy),msg.sender);

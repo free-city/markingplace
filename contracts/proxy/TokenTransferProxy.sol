@@ -25,7 +25,7 @@ contract TokenTransferProxy {
      * @param amount Transfer amount
      */
     function transferFrom(address token, address from, address to, uint amount)
-    public
+    external
     returns (bool)
     {
         require(registry.contracts(msg.sender));
